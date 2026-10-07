@@ -41,9 +41,68 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash tests/test_html.sh
 
+  # NEW: works out today's date and the next revision number (.1, .2, .3 ...)
+  prepare-tag:
+    name: Create Image Tag
+    needs: unit-test
+    runs-on: ubuntu-latest
+
+    # Values that the next jobs can read
+    outputs:
+      tag_date: ${{ steps.tag.outputs.tag_date }}
+      revision: ${{ steps.tag.outputs.revision }}
+
+    steps:
+      - name: Work out date and next revision
+        id: tag
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -eu
+
+          # Today's date (UTC), like 2026-10-08
+          DATE=$(date -u +%Y-%m-%d)
+
+          # Log in to the Docker Hub API to get a short-lived token
+          JWT=$(jq -n --arg u "$DH_USER" --arg p "$DH_TOKEN" '{username:$u,password:$p}' \
+            | curl -s -H "Content-Type: application/json" -d @- https://hub.docker.com/v2/users/login \
+            | jq -r '.token // empty')
+
+          if [ -z "$JWT" ]; then
+            echo "Could not log in to Docker Hub. Check DOCKERHUB_USERNAME and DOCKERHUB_TOKEN."
+            exit 1
+          fi
+
+          # Look through the existing tags for today and find the highest number
+          MAX=0
+          URL="https://hub.docker.com/v2/repositories/$DH_USER/frontend/tags?page_size=100&name=latest-$DATE"
+
+          while [ -n "$URL" ]; do
+            RESP=$(curl -s -H "Authorization: JWT $JWT" "$URL")
+
+            for NAME in $(echo "$RESP" | jq -r '.results[]?.name'); do
+              if [[ "$NAME" =~ ^latest-${DATE}\.([0-9]+)-(amd|arm)$ ]]; then
+                NUM="${BASH_REMATCH[1]}"
+                if [ "$NUM" -gt "$MAX" ]; then
+                  MAX="$NUM"
+                fi
+              fi
+            done
+
+            URL=$(echo "$RESP" | jq -r '.next // empty')
+          done
+
+          # Next revision is the highest found plus 1 (starts at 1 if none exist)
+          REVISION=$((MAX + 1))
+
+          echo "tag_date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "Next tag will be: latest-$DATE.$REVISION-amd and latest-$DATE.$REVISION-arm"
+
   docker-build:
     name: Docker Build and Push (${{ matrix.suffix }})
-    needs: unit-test
+    needs: prepare-tag
     runs-on: ubuntu-latest
 
     # Runs this job twice, once per architecture
@@ -56,15 +115,12 @@ jobs:
             suffix: arm
 
     env:
-      IMAGE: aakanshh/frontend
-      REVISION: ${{ github.run_number }} 
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/frontend
+      TAG_DATE: ${{ needs.prepare-tag.outputs.tag_date }}
+      REVISION: ${{ needs.prepare-tag.outputs.revision }}
 
     steps:
       - uses: actions/checkout@v4
-
-      # Creates today's date like 2026-10-07 for the tag
-      - name: Create tag date
-        run: echo "TAG_DATE=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
 
       - uses: docker/setup-qemu-action@v3
 
@@ -81,7 +137,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          provenance: false      # keeps each tag a plain single image
+          provenance: false
           sbom: false
           tags: ${{ env.IMAGE }}:latest-${{ env.TAG_DATE }}.${{ env.REVISION }}-${{ matrix.suffix }}
           cache-from: type=gha,scope=${{ matrix.suffix }}
