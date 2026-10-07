@@ -1,0 +1,7 @@
+{
+  "doctype-first": true,
+  "html-lang-require": true,
+  "title-require": true,
+  "tag-pair": true,
+  "alt-require": true
+}
