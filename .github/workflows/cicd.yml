@@ -5,14 +5,20 @@ on:
     branches:
       - main
 
+# Least privilege: jobs can only read the repo
+permissions:
+  contents: read
+
 jobs:
 
+  # Stage 1: download the code
   checkout:
     name: Checkout Code
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+  # Stage 2: look for leaked passwords and keys in the git history
   gitleaks:
     name: Gitleaks Scan
     needs: checkout
@@ -25,6 +31,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Stage 3: check HTML style
   lint:
     name: HTML Lint
     needs: gitleaks
@@ -33,6 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: npx --yes htmlhint@1 --config .htmlhintrc index.html error.html
 
+  # Stage 4: simple test
   unit-test:
     name: Unit Test
     needs: lint
@@ -41,17 +49,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash tests/test_html.sh
 
-  # NEW: works out today's date and the next revision number (.1, .2, .3 ...)
+  # SonarQube + Quality Gate will be added here later.
+  # When added, change "needs: unit-test" in prepare-tag to "needs: sonarqube".
+
+  # Works out today's date and the next revision number (.1, .2, .3 ...)
   prepare-tag:
     name: Create Image Tag
     needs: unit-test
     runs-on: ubuntu-latest
-
-    # Values that the next jobs can read
     outputs:
       tag_date: ${{ steps.tag.outputs.tag_date }}
       revision: ${{ steps.tag.outputs.revision }}
-
     steps:
       - name: Work out date and next revision
         id: tag
@@ -61,10 +69,8 @@ jobs:
         run: |
           set -eu
 
-          # Today's date (UTC), like 2026-10-08
           DATE=$(date -u +%Y-%m-%d)
 
-          # Log in to the Docker Hub API to get a short-lived token
           JWT=$(jq -n --arg u "$DH_USER" --arg p "$DH_TOKEN" '{username:$u,password:$p}' \
             | curl -s -H "Content-Type: application/json" -d @- https://hub.docker.com/v2/users/login \
             | jq -r '.token // empty')
@@ -74,7 +80,6 @@ jobs:
             exit 1
           fi
 
-          # Look through the existing tags for today and find the highest number
           MAX=0
           URL="https://hub.docker.com/v2/repositories/$DH_USER/frontend/tags?page_size=100&name=latest-$DATE"
 
@@ -93,19 +98,18 @@ jobs:
             URL=$(echo "$RESP" | jq -r '.next // empty')
           done
 
-          # Next revision is the highest found plus 1 (starts at 1 if none exist)
           REVISION=$((MAX + 1))
 
           echo "tag_date=$DATE" >> "$GITHUB_OUTPUT"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "Next tag will be: latest-$DATE.$REVISION-amd and latest-$DATE.$REVISION-arm"
 
+  # Stage 7: build one image per architecture and push to Docker Hub
   docker-build:
     name: Docker Build and Push (${{ matrix.suffix }})
     needs: prepare-tag
     runs-on: ubuntu-latest
 
-    # Runs this job twice, once per architecture
     strategy:
       matrix:
         include:
@@ -142,3 +146,62 @@ jobs:
           tags: ${{ env.IMAGE }}:latest-${{ env.TAG_DATE }}.${{ env.REVISION }}-${{ matrix.suffix }}
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+
+  # Stage 8: scan the pushed images for vulnerabilities and create an SBOM
+  docker-scout:
+    name: Docker Scout (${{ matrix.suffix }})
+    needs: [prepare-tag, docker-build]
+    runs-on: ubuntu-latest
+
+    # Scans both images: the amd one and the arm one
+    strategy:
+      matrix:
+        suffix: [amd, arm]
+
+    env:
+      # The exact image that docker-build just pushed
+      IMAGE_REF: ${{ secrets.DOCKERHUB_USERNAME }}/frontend:latest-${{ needs.prepare-tag.outputs.tag_date }}.${{ needs.prepare-tag.outputs.revision }}-${{ matrix.suffix }}
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Part 1: show critical and high vulnerabilities in the logs. Never fails.
+      - name: Scout - show vulnerabilities
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ env.IMAGE_REF }}
+          only-severities: critical,high
+          summary: true
+          exit-code: false
+
+      # Part 2: create the SBOM (a list of everything inside the image)
+      - name: Scout - create SBOM
+        uses: docker/scout-action@v1
+        with:
+          command: sbom
+          image: ${{ env.IMAGE_REF }}
+          format: spdx
+          output: sbom-${{ matrix.suffix }}.spdx.json
+
+      # Saves the SBOM so you can download it from the run page
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.suffix }}
+          path: sbom-${{ matrix.suffix }}.spdx.json
+
+      # Part 3: security gate. Fails the pipeline if a CRITICAL
+      # vulnerability exists that already has a fix available.
+      - name: Scout - fail on critical vulnerabilities
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ env.IMAGE_REF }}
+          only-severities: critical
+          only-fixed: true
+          summary: false
+          exit-code: true
