@@ -49,13 +49,34 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash tests/test_html.sh
 
-  # SonarQube + Quality Gate will be added here later.
-  # When added, change "needs: unit-test" in prepare-tag to "needs: sonarqube".
+  # Stage 5: SonarQube code scan, then wait for the Quality Gate result.
+  # The pipeline stops here if the Quality Gate fails.
+  sonarqube:
+    name: SonarQube + Quality Gate
+    needs: unit-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: SonarQube Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
   # Works out today's date and the next revision number (.1, .2, .3 ...)
   prepare-tag:
     name: Create Image Tag
-    needs: unit-test
+    needs: sonarqube
     runs-on: ubuntu-latest
     outputs:
       tag_date: ${{ steps.tag.outputs.tag_date }}
