@@ -56,7 +56,7 @@ jobs:
             suffix: arm
 
     env:
-      IMAGE: citiuscloud/frontend
+      IMAGE: aakansh/frontend
       REVISION: ${{ github.run_number }} 
 
     steps:
