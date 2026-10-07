@@ -56,7 +56,7 @@ jobs:
             suffix: arm
 
     env:
-      IMAGE: aakansh/frontend
+      IMAGE: aakanshh/frontend
       REVISION: ${{ github.run_number }} 
 
     steps:
