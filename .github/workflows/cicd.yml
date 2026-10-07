@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash tests/test_html.sh
 
- docker-build:
+  docker-build:
     name: Docker Build and Push (${{ matrix.suffix }})
     needs: unit-test
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
 
     env:
       IMAGE: citiuscloud/frontend
-      REVISION: ${{ github.run_number }} #is a counter that GitHub increases by 1 on every pipeline run (1, 2, 3, ...). It never resets, even on a new da
+      REVISION: ${{ github.run_number }} 
 
     steps:
       - uses: actions/checkout@v4
